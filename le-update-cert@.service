@@ -1,0 +1,8 @@
+[Unit]
+Description=Retrieve updated Let's Encrypt TLS certificate for %I
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/le-update-cert --production %I
+User=acme
+Group=acme

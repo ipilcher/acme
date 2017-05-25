@@ -1,0 +1,5 @@
+/usr/(local/)?bin/le-update-cert	--	gen_context(system_u:object_r:acme_le_exec_t, s0)
+/usr/(local/)?bin/update-mod-nss	--	gen_context(system_u:object_r:acme_nss_exec_t,s0)
+/etc/acme(/.*)?					gen_context(system_u:object_r:acme_etc_t, s0)
+/var/lib/acme(/.*)?				gen_context(system_u:object_r:acme_var_lib_t, s0)
+/var/www/acme-challenge(/.*)?			gen_context(system_u:object_r:httpd_acme_content_t, s0)

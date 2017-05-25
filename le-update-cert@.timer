@@ -1,0 +1,10 @@
+[Unit]
+Description=Retrieve updated Let's Encrypt TLS certificate for %I
+
+[Timer]
+OnCalendar=daily
+AccuracySec=1h
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target

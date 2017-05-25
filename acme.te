@@ -1,0 +1,109 @@
+policy_module(acme, 0.0.1)
+
+require {
+	type httpd_config_t;
+	type passwd_file_t;
+	type shell_exec_t;
+	type http_port_t;
+	type net_conf_t;
+	type kernel_t;
+	type devlog_t;
+	type httpd_t;
+	type proc_t;
+	type cert_t;
+	type tmp_t;
+};
+
+type acme_le_t;
+type acme_nss_t;
+type acme_le_exec_t;
+type acme_nss_exec_t;
+type acme_etc_t;
+type acme_var_lib_t;
+type httpd_acme_content_t;
+
+files_type(acme_etc_t)
+files_type(acme_var_lib_t)
+files_type(httpd_acme_content_t)
+
+
+#
+#	Let's Encrypt client (acme_le_t)
+#
+
+init_daemon_domain(acme_le_t, acme_le_exec_t)
+
+# syslog
+allow acme_le_t self:unix_dgram_socket { create connect write };
+allow acme_le_t kernel_t:unix_dgram_socket { sendto };
+allow acme_le_t devlog_t:sock_file { write };
+
+# Communication with letsencrypt.org and self-validation
+allow acme_le_t self:tcp_socket { create setopt connect getattr getopt write read };
+allow acme_le_t http_port_t:tcp_socket { name_connect };
+
+# State directory (/var/lib/acme)
+allow acme_le_t acme_var_lib_t:dir { search write add_name remove_name };
+allow acme_le_t acme_var_lib_t:file { read open getattr create write };
+allow acme_le_t acme_var_lib_t:lnk_file { create unlink read };
+
+# Configuration directory (/etc/acme)
+allow acme_le_t acme_etc_t:dir { search };
+allow acme_le_t acme_etc_t:file { read open getattr };
+
+# ACME HTTP challenge content
+allow acme_le_t httpd_acme_content_t:dir { search write add_name remove_name };
+allow acme_le_t httpd_acme_content_t:file { create write open getattr unlink };
+allow httpd_t httpd_acme_content_t:file { getattr read open };
+
+# /etc/hosts and DNS queries
+allow acme_le_t net_conf_t:file { read open getattr };
+allow acme_le_t self:udp_socket { create connect write read getattr };
+
+# System trusted CAs
+allow acme_le_t cert_t:dir { search };
+allow acme_le_t cert_t:lnk_file { read };
+allow acme_le_t cert_t:file { read open getattr };
+
+
+#
+#	NSS database updater
+#
+
+init_daemon_domain(acme_nss_t, acme_nss_exec_t)
+
+# syslog
+allow acme_nss_t self:unix_dgram_socket { create connect write };
+allow acme_nss_t kernel_t:unix_dgram_socket { sendto };
+allow acme_nss_t devlog_t:sock_file { write };
+
+# State directory (/var/lib/acme)
+allow acme_nss_t acme_var_lib_t:dir { search };
+allow acme_nss_t acme_var_lib_t:lnk_file { read };
+allow acme_nss_t acme_var_lib_t:file { read open getattr };
+
+# mod_nss database
+allow acme_nss_t httpd_config_t:dir { search read open write add_name remove_name };
+type_transition acme_nss_t httpd_config_t:dir cert_t;
+type_transition acme_nss_t httpd_config_t:lnk_file cert_t;
+allow acme_nss_t cert_t:dir { search read open create setattr write add_name getattr remove_name rmdir };
+allow acme_nss_t cert_t:file { getattr read write open create setattr unlink };
+allow acme_nss_t cert_t:lnk_file { getattr read create setattr rename unlink };
+allow acme_nss_t self:capability { chown fsetid dac_read_search fowner };
+
+# seteuid/setegid
+allow acme_nss_t passwd_file_t:file { read open getattr };
+allow acme_nss_t self:capability { setgid setuid };
+
+
+#
+# 	DON'T AUDIT RULES
+#
+
+dontaudit acme_le_t proc_t:file { read };
+dontaudit acme_le_t shell_exec_t:file { execute };
+dontaudit acme_le_t tmp_t:dir { write };
+dontaudit acme_le_t self:netlink_route_socket { create };
+
+dontaudit acme_nss_t tmp_t:dir { read };
+dontaudit acme_nss_t self:capability { dac_override };

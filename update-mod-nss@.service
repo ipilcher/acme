@@ -1,0 +1,9 @@
+[Unit]
+Description=Update mod_nss certificate for %I
+ConditionPathIsSymbolicLink=/var/lib/acme/%I.new
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-mod-nss -d acme %I
+ExecStartPost=-/usr/bin/rm /var/lib/acme/%I.new
+ExecStartPost=/usr/bin/systemctl reload httpd.service

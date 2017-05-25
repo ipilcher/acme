@@ -1,0 +1,179 @@
+#!/usr/bin/python2
+
+# Copyright 2017 Ian Pilcher <arequipeno@gmail.com>
+#
+# This program is free software.  You can redistribute it or modify it under the
+# terms of version 2 of the GNU General Public License (GPL), as published by
+# the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY -- without even the implied warranty of MERCHANTABILITY of
+# FITNESS FOR A PARTICULAR PURPOSE.  See the text of the GPL for more details.
+#
+# Version 2 of the GNU General Public License is available at:
+#
+#   http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+#
+
+import argparse
+import logging
+import datetime
+import errno
+import sys
+import cryptography
+import os
+
+from cryptography import x509
+from cryptography.hazmat import backends
+from cryptography.hazmat.primitives import serialization
+from OpenSSL import crypto
+
+from acme import jose
+from acme import client
+from acme import challenges
+
+EXIT_SUCCESS = 0
+EXIT_FAILURE = 1
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--production',
+		    help="use Let's Encrypt production environment",
+		    action='store_true')
+parser.add_argument('-d', '--debug',
+		    help='log debugging messages',
+		    action='store_true')
+parser.add_argument('-t', '--tty',
+		    help='log to terminal (stderr) instead of syslog',
+		    action='store_true')
+parser.add_argument('-f', '--force',
+		    help='force refresh (ignore existing certificate)',
+		    action='store_true')
+parser.add_argument('-r', '--register',
+		    help='register the client key (and exit)',
+		    action='store_true')
+parser.add_argument('hostname',
+		    help='the hostname of the certificate to be updated')
+args = parser.parse_args()
+
+LOG = logging.getLogger(__name__)
+LOG.setLevel(logging.DEBUG if args.debug else logging.INFO)
+LOG.propagate = False
+
+if args.tty:
+	LOG.addHandler(logging.StreamHandler())
+else:
+	from logging.handlers import SysLogHandler
+	LOG.addHandler(SysLogHandler(address='/dev/log',
+		       facility=SysLogHandler.LOG_USER))
+
+HOSTNAME = args.hostname
+CERT_FILENAME = '/var/lib/acme/{0}.crt'.format(HOSTNAME)
+NEW_CERT_SYMLINK = '/var/lib/acme/{0}.new'.format(HOSTNAME)
+CSR_FILENAME = '/etc/acme/{0}.csr'.format(HOSTNAME)
+CLIENT_KEY_FILENAME = '/etc/acme/client.key'
+ACME_CHALLENGE_DIR = '/var/www/acme-challenge'
+
+if args.production:
+	ACME_URL = 'https://acme-v01.api.letsencrypt.org/directory'
+else:
+	ACME_URL = 'https://acme-staging.api.letsencrypt.org/directory'
+
+LOG.info('Updating certificate for {0}'.format(HOSTNAME))
+LOG.debug('  certificate file: {0}'.format(CERT_FILENAME))
+LOG.debug('  new certificate symlink: {0}'.format(NEW_CERT_SYMLINK))
+LOG.debug('  CSR file: {0}'.format(CSR_FILENAME))
+LOG.debug('  client key file: {0}'.format(CLIENT_KEY_FILENAME))
+LOG.debug('  ACME URL: {0}'.format(ACME_URL));
+LOG.debug('  ACME challenge directory: {0}'.format(ACME_CHALLENGE_DIR))
+
+crypto_backend = backends.default_backend()
+
+with open(CLIENT_KEY_FILENAME, 'r') as client_key_file:
+	rsakey = serialization.load_pem_private_key(client_key_file.read(),
+						    backend=crypto_backend,
+						    password=None)
+LOG.debug('Loaded client key from {0}'.format(CLIENT_KEY_FILENAME))
+
+client_key = jose.JWKRSA(key=rsakey)
+acme_client = client.Client(ACME_URL, client_key)
+
+if args.register:
+	regr = acme_client.register()
+	LOG.info('Agreeing to terms of service at {0}'
+		 .format(regr.terms_of_service))
+	acme_client.agree_to_tos(regr)
+	sys.exit(EXIT_SUCCESS)
+
+cert = None
+
+if not args.force:
+	try:
+		with open(CERT_FILENAME, 'r') as cert_file:
+			cert = x509.load_pem_x509_certificate(cert_file.read(),
+							      crypto_backend)
+	except EnvironmentError as e:
+		if e.errno == errno.ENOENT:
+			LOG.info('No existing certificate found for {0}'
+				 .format(HOSTNAME))
+		else:
+			raise
+
+if cert is not None:
+	cert_life = cert.not_valid_after - datetime.datetime.utcnow()
+	if cert_life > datetime.timedelta(days=30):
+		LOG.info('Certificate for {0} has {1} days remaining; exiting'
+			 .format(HOSTNAME, cert_life.days))
+		sys.exit(EXIT_SUCCESS)
+
+with open(CSR_FILENAME, 'r') as csr_file:
+	csr = crypto.load_certificate_request(crypto.FILETYPE_PEM,
+					      csr_file.read())
+
+authr = acme_client.request_domain_challenges(HOSTNAME)
+challb = None
+
+for combo in authr.body.combinations:
+	if len(combo) != 1:
+		continue
+	challb = authr.body.challenges[combo[0]]
+	if isinstance(challb.chall, challenges.HTTP01):
+		break
+	challb = None
+
+if challb is None:
+	raise Exception('CA did not offer http-01-only challenge combo')
+
+response, validation = challb.response_and_validation(client_key)
+
+validation_path = os.path.join(ACME_CHALLENGE_DIR, challb.path.split('/')[-1])
+with open(validation_path, 'w') as validation_file:
+	validation_file.write(validation)
+LOG.debug('Wrote HTTP validation content for {0} to {1}'
+	.format(HOSTNAME, validation_path))
+
+if not response.simple_verify(challb.chall, HOSTNAME, acme_client.key.public_key()):
+	LOG.warning('Self-validation of {0} failed'.format(HOSTNAME))
+else:
+	LOG.debug('Self-validation of {0} succeeded'.format(HOSTNAME))
+
+acme_client.answer_challenge(challb, response)
+LOG.debug('Answered chanllenge for {0}; attempting to retrieve certificate'
+	  .format(HOSTNAME))
+certr, _ = acme_client.poll_and_request_issuance(jose.ComparableX509(csr), [ authr ])
+LOG.debug('Got new certificate for {0}'.format(HOSTNAME))
+os.remove(validation_path)
+LOG.debug('Removed validation file: {0}'.format(validation_path))
+
+with open(CERT_FILENAME, 'w') as cert_file:
+	cert_file.write(certr.body._dump(crypto.FILETYPE_PEM))
+
+try:
+	os.symlink(CERT_FILENAME.split('/')[-1], NEW_CERT_SYMLINK)
+except EnvironmentError as e:
+	if e.errno == errno.EEXIST:
+		os.remove(NEW_CERT_SYMLINK)
+		os.symlink(CERT_FILENAME.split('/')[-1], NEW_CERT_SYMLINK)
+	else:
+		raise
+
+LOG.info('Successfully updated certificate for {0}'.format(HOSTNAME))
