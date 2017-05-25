@@ -284,7 +284,6 @@ static void parse_args(const int argc, char **const argv)
  */
 static int old_nssdb_dir(const int httpd_conf_dirfd, struct stat *const linkst)
 {
-	char *fdpath;
 	int fd;
 
 	fd = openat(httpd_conf_dirfd, "alias", O_RDONLY | O_NOFOLLOW | O_PATH);
@@ -317,11 +316,6 @@ static int old_nssdb_dir(const int httpd_conf_dirfd, struct stat *const linkst)
 		FATAL("Symbolic link target invalid: %s/alias -> %s\n",
 		      httpd_conf_dir, old_dbdir_name);
 	}
-
-	if (asprintf(&fdpath, "/proc/self/fd/%d", fd) < 0)
-		FATAL("Failed to format path: /proc/self/fd/%d: %m\n", fd);
-
-	free(fdpath);
 
 	if (close(fd) < 0) {
 		FATAL("Failed to close symbolic link: %s/alias: %m\n",
