@@ -578,7 +578,7 @@ static int create_symlink(const int dirfd,
 	int fd;
 
 	if (*dbdir_name == 0)
-		assert(*path != '/'&& *path != 0);
+		assert(*path != '/' && *path != 0);
 	else
 		assert(path[0] == '/' && path[1] != 0);
 
