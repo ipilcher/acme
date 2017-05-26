@@ -41,7 +41,7 @@ The basic process used is:
 4. Delete any old certificates for $HOSTNAME from the **new** NSS database.
 5. Add the new certificate to the new NSS database.
 6. Copy all other files, subdirectories, and symlinks from the old mod_nss directory to the new directory.
-7. Create a new symlink (`/etc/httpd/alias.net`) that points to the new mod_nss directory.
+7. Create a new symlink (`/etc/httpd/alias.new`) that points to the new mod_nss directory.
 8. Rename the new symlink to `/etc/httpd/alias`. (This is an atomic operation.)
 9. Delete the old mod_nss directory.
 10. Reload httpd (done by systemd as an `ExecStartPost` step).
