@@ -5,6 +5,7 @@ require {
 	type passwd_file_t;
 	type shell_exec_t;
 	type http_port_t;
+	type ipa_cert_t;
 	type net_conf_t;
 	type kernel_t;
 	type devlog_t;
@@ -67,7 +68,7 @@ allow acme_le_t cert_t:file { read open getattr };
 
 
 #
-#	NSS database updater
+#	NSS database updater (acme_nss_t)
 #
 
 init_daemon_domain(acme_nss_t, acme_nss_exec_t)
@@ -90,6 +91,10 @@ allow acme_nss_t cert_t:dir { search read open create setattr write add_name get
 allow acme_nss_t cert_t:file { getattr read write open create setattr unlink };
 allow acme_nss_t cert_t:lnk_file { getattr read create setattr rename unlink };
 allow acme_nss_t self:capability { chown fsetid dac_read_search fowner };
+
+# GSSAPI session key (/etc/httpd/alias/ipasession.key)
+type_transition acme_nss_t cert_t:file ipa_cert_t "ipasession.key";
+allow acme_nss_t ipa_cert_t:file { getattr read write open create setattr unlink };
 
 # seteuid/setegid
 allow acme_nss_t passwd_file_t:file { read open getattr };
