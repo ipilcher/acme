@@ -59,7 +59,7 @@ allow httpd_t httpd_acme_content_t:file { getattr read open };
 
 # /etc/hosts and DNS queries
 allow acme_le_t net_conf_t:file { read open getattr };
-allow acme_le_t self:udp_socket { create connect write read getattr };
+allow acme_le_t self:udp_socket { create connect write read getattr setopt };
 
 # System trusted CAs
 allow acme_le_t cert_t:dir { search };
