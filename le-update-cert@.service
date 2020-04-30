@@ -4,8 +4,8 @@ Description=Retrieve updated Let's Encrypt TLS certificate for %I
 [Service]
 Type=oneshot
 PrivateTmp=true
-ExecStartPre=/usr/bin/ln -s /usr/bin/python2 /tmp/python.le-update-cert
-ExecStartPre=/usr/bin/chcon --reference=/usr/local/bin/le-update-cert --no-dereference /tmp/python.le-update-cert
+ExecStartPre=/usr/bin/cp /usr/bin/python2 /tmp/python.le-update-cert
+ExecStartPre=/usr/bin/chcon --reference=/usr/local/bin/le-update-cert /tmp/python.le-update-cert
 ExecStart=/tmp/python.le-update-cert /usr/local/bin/le-update-cert --production %I
 User=acme
 Group=acme
