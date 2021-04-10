@@ -1,0 +1,291 @@
+#!/usr/bin/python2
+
+# Copyright 2021 Ian Pilcher <arequipeno@gmail.com>
+#
+# This program is free software.  You can redistribute it or modify it under the
+# terms of version 2 of the GNU General Public License (GPL), as published by
+# the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY -- without even the implied warranty of MERCHANTABILITY of
+# FITNESS FOR A PARTICULAR PURPOSE.  See the text of the GPL for more details.
+#
+# Version 2 of the GNU General Public License is available at:
+#
+#   http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+#
+
+
+import acme.challenges
+import acme.client
+import acme.messages
+import argparse
+import base64
+import cryptography
+import datetime
+import errno
+import josepy
+import logging
+import logging.handlers
+import os
+import sys
+
+
+CONFIG_DIR = '/etc/acme'
+STATE_DIR = '/var/lib/acme'
+CHALLENGE_DIR = '/var/www/acme-challenge'
+
+LE_URLS = [
+	'https://acme-staging-v02.api.letsencrypt.org/directory',	# production == False (0)
+	'https://acme-v02.api.letsencrypt.org/directory'		# production == True (1)
+]
+
+CRYPTO_BACKEND = cryptography.hazmat.backends.default_backend()
+LOGGER = logging.getLogger(__name__)
+
+
+#
+#	Parse command-line arguments
+#
+
+def parse_args():
+
+	parser = argparse.ArgumentParser()
+	parser.add_argument('--production', help="use Let's Encrypt production environment", action='store_true')
+	parser.add_argument('-d', '--debug', help='log debugging messages', action='store_true')
+	parser.add_argument('-t', '--tty', help='log to terminal (stderr) instead of syslog', action='store_true')
+	parser.add_argument('-f', '--force', help='force refresh (ignore existing certificate)', action='store_true')
+	parser.add_argument('hostname', help='the hostname of the certificate to be updated')
+	return parser.parse_args()
+
+
+#
+#	Set up logging
+#
+
+def logging_init(args):
+
+	LOGGER.setLevel(logging.DEBUG if args.debug else logging.INFO)
+	LOGGER.propagate = False
+
+	if args.tty:
+		LOGGER.addHandler(logging.StreamHandler())
+	else:
+		LOGGER.addHandler(logging.handlers.SysLogHandler(address='/dev/log'))
+
+	LOGGER.debug('Logging to {0}'.format('STDERR' if args.tty else 'SYSLOG'))
+
+
+#
+#	Check expiration of existing certificate
+#
+
+def check_cert_life(hostname, min_days):
+
+	cert_filename = '{0}/{1}.crt'.format(STATE_DIR, hostname)
+
+	try:
+		with open(cert_filename, 'r') as cert_file:
+			cert = cryptography.x509.load_pem_x509_certificate(cert_file.read(), CRYPTO_BACKEND)
+	except EnvironmentError as e:
+		if e.errno == errno.ENOENT:
+			LOGGER.info('No existing certificate found for {0}'.format(hostname))
+			return
+		else:
+			raise
+
+	cert_life = cert.not_valid_after - datetime.datetime.utcnow()
+
+	if cert_life > datetime.timedelta(days=min_days):
+		LOGGER.info('Certificate for {0} has {1} days remaining; exiting'.format(hostname, cert_life.days))
+		sys.exit(0)
+
+	LOGGER.debug('Certificate for {0} has {1} days remaining'.format(hostname, cert_life.days))
+
+
+#
+#	Load the Let's Encrypt client key
+#
+
+def load_client_key(hostname):
+
+	key_filename = '{0}/{1}-acme.key'.format(CONFIG_DIR, hostname)
+
+	with open(key_filename, 'rb') as key_file:
+		key_pem = key_file.read()
+
+	rsakey = cryptography.hazmat.primitives.serialization.load_pem_private_key(
+						key_pem, backend=CRYPTO_BACKEND, password=None)
+	jwk = josepy.JWKRSA(key=rsakey)
+	LOGGER.debug('Loaded client key from {0}'.format(key_filename))
+	return jwk
+
+
+#
+#	Load or retrieve the account URI
+#
+
+def get_account_uri(jwk, production):
+
+	uri_filename = '{0}/{1}'.format(STATE_DIR, base64.urlsafe_b64encode(jwk.thumbprint()))
+
+	try:
+		with open(uri_filename, 'r') as uri_file:
+			uri = uri_file.read()
+			LOGGER.debug('Loaded account URI from {0}'.format(uri_filename))
+			return uri
+	except EnvironmentError as e:
+		if e.errno != errno.ENOENT:
+			raise
+
+	LOGGER.debug('Account URI cache ({0}) not present'.format(uri_filename))
+
+	# https://community.letsencrypt.org/t/acme-python-clientv2-not-able-to-renew-a-certificate-without-enrolling-new-account/103452/3
+
+	reg = acme.messages.NewRegistration(key=jwk.public_key(), only_return_existing=True)
+	net = acme.client.ClientNetwork(jwk)
+	directory = acme.messages.Directory.from_json(net.get(LE_URLS[production]).json())
+	client = acme.client.ClientV2(directory, net)
+	regr = client._regr_from_response(client._post(directory['newAccount'], reg))
+
+	LOGGER.debug('Got account URI: {0}'.format(regr.uri))
+
+	with open(uri_filename, 'w') as uri_file:
+		uri_file.write(regr.uri)
+
+	LOGGER.debug('Cached account URI at {0}'.format(uri_filename))
+
+	return regr.uri
+
+
+#
+#	Create an ACME client
+#
+
+def create_client(jwk, acct_uri, production):
+
+	client_net = acme.client.ClientNetwork(jwk, account=acme.messages.RegistrationResource(uri=acct_uri))
+	directory = acme.messages.Directory.from_json(client_net.get(LE_URLS[production]).json())
+	return acme.client.ClientV2(directory, net=client_net)
+
+
+#
+#	Load the certificate signing request
+#
+
+def load_csr(hostname):
+
+	csr_filename = '{0}/{1}.csr'.format(CONFIG_DIR, hostname)
+
+	with open(csr_filename, 'rb') as csr_file:
+		csr = csr_file.read()
+
+	LOGGER.debug('Loaded CSR for {0} from {1}'.format(hostname, csr_filename))
+
+	return csr
+
+
+#
+#	Find the HTTP-01 challeng in an order
+#
+
+def get_http01_challenge(order):
+
+	for authr in order.authorizations:
+		for challenge in authr.body.challenges:
+			if isinstance(challenge.chall, acme.challenges.HTTP01):
+				return challenge
+
+	raise Exception('ACME server did not offer an HTTP-01 challenge')
+
+
+#
+#	Execute the challenge
+#
+
+def execute_challenge(client, csr, hostname):
+
+	order = client.new_order(csr)
+	challenge = get_http01_challenge(order)
+	response, validation = challenge.response_and_validation(client.net.key)
+
+	validation_filename = '{0}/{1}'.format(CHALLENGE_DIR, challenge.path.split('/')[-1])
+
+	with open(validation_filename, 'w') as validation_file:
+		validation_file.write(validation)
+
+	LOGGER.debug('Wrote validation file to {0}'.format(validation_filename))
+
+	client.answer_challenge(challenge, response)
+	order = client.poll_and_finalize(order)
+
+	if order.body.status != acme.messages.STATUS_VALID:
+		raise Exception('Order status ({0}) is not VALID'.format(order.body.status.name))
+
+	LOGGER.debug('Got VALID order from ACME server')
+
+	os.remove(validation_filename)
+
+	LOGGER.debug('Removed validation file ({0})'.format(validation_filename))
+
+	# This assumes that the server certificate is first in the PEM chain
+	cert = cryptography.x509.load_pem_x509_certificate(str(order.fullchain_pem), backend=CRYPTO_BACKEND)
+
+	cn = cert.subject.get_attributes_for_oid(cryptography.x509.oid.NameOID.COMMON_NAME)[0].value
+	assert cn == hostname
+
+	LOGGER.debug('Got certificate for {0}'.format(hostname))
+
+	return cert
+
+
+#
+#	Write the new certificate
+#
+
+def write_certificate(cert, hostname):
+
+	cert_filename = '{0}/{1}.crt'.format(STATE_DIR, hostname)
+
+	with open(cert_filename, 'w') as cert_file:
+		cert_file.write(cert.public_bytes(cryptography.hazmat.primitives.serialization.Encoding.PEM))
+
+	LOGGER.notice('Wrote new certificate for {0} to {1}'.format(hostname, cert_filename))
+	LOGGER.notice('New certificate valid until {0} UTC'.format(cert.not_valid_after))
+
+	cert_filename = '{0}.crt'.format(hostname)
+	link_filename = '{0}/{1}.new'.format(STATE_DIR, hostname)
+
+	try:
+		os.symlink(cert_filename, link_filename)
+	except EnvironmentError as e:
+		if e.errno == errno.EEXIST:
+			os.remove(link_filename)
+			os.symlink(cert_filename, link_filename)
+		else:
+			raise
+
+	LOGGER.debug('Created symlink: {0} -> {1}'.format(link_filename, cert_filename))
+
+
+def main():
+
+	args = parse_args()
+	logging_init(args)
+
+	if not args.force:
+		check_cert_life(args.hostname, 30)
+
+	csr = load_csr(args.hostname)
+	client_key = load_client_key(args.hostname)
+	acct_uri = get_account_uri(client_key, args.production)
+	client = create_client(client_key, acct_uri, args.production)
+	cert = execute_challenge(client, csr, args.hostname)
+
+	write_certificate(cert, args.hostname)
+
+	LOGGER.info('Great success!')
+
+
+if __name__ == '__main__':
+	main()
